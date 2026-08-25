@@ -1,19 +1,7 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { defaultSettings, Intern, metrics, newIntern, production, reasons, Settings } from "../lib/evaluation";
-type Role = "owner" | "admin" | "intern";
-type User = {
-    id: string;
-    name: string;
-    username: string;
-    passwordHash: string;
-    role: Role;
-    approved: boolean;
-    canManage: boolean;
-    internIds: string[];
-    tag: "实习生" | "管理人";
-    avatar?: string;
-};
+import type { SharedData, User } from "../lib/shared-state";
 type AdminView = "interns" | "detail" | "projects" | "settings" | "access";
 const scoreKeys = [["video", "AI视频"], ["edit", "剪辑"], ["promo", "剧宣"], ["aesthetic", "审美"], ["final", "成片"]] as const;
 const help: {
@@ -21,52 +9,92 @@ const help: {
 } = { video: "分镜执行、人物一致性、动作和镜头控制", edit: "剧情理解、节奏、声音与完整成片", promo: "前3秒钩子、卖点提取和传播意识", aesthetic: "构图、光色、风格统一和选片判断", final: "上线质量、交付稳定性和低级错误频率" };
 const workTypes = ["剧宣预告", "成片集数", "资产图片", "其他"];
 const hash = async (v: string) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v)))).map(x => x.toString(16).padStart(2, "0")).join("");
+function importLegacyState(cloud: SharedData, viewer: User): SharedData {
+    if (viewer.role !== "owner" || cloud.users.length > 1 || cloud.interns.length)
+        return cloud;
+    try {
+        const oldUsers = JSON.parse(localStorage.getItem("frame-users-v1") || "[]") as User[];
+        const oldWork = JSON.parse(localStorage.getItem("ai-intern-system-v1") || "null") as { interns?: Intern[]; projects?: string[]; settings?: Settings } | null;
+        if (oldUsers.length <= 1 && !oldWork?.interns?.length)
+            return cloud;
+        const owner = oldUsers.find(user => user.username === "boss_admin") || cloud.users[0];
+        const users = [owner, ...oldUsers.filter(user => user.id !== owner.id && user.username !== "boss_admin")].map((user, index) => ({ ...user, role: index === 0 ? "owner" as const : user.role || (user.tag === "管理人" ? "admin" as const : "intern" as const), approved: index === 0 ? true : user.approved ?? true, canManage: index === 0 || user.tag === "管理人", internIds: user.internIds || [], tag: index === 0 || user.tag === "管理人" ? "管理人" as const : "实习生" as const }));
+        return { version: 9, users, interns: oldWork?.interns || [], projects: oldWork?.projects?.length ? oldWork.projects : cloud.projects, settings: { ...defaultSettings, ...oldWork?.settings } };
+    } catch {
+        return cloud;
+    }
+}
 export default function EvaluationApp() {
-    const [users, setUsers] = useState<User[]>([]), [activeId, setActiveId] = useState(""), [ready, setReady] = useState(false);
-    useEffect(() => { const raw = JSON.parse(localStorage.getItem("frame-users-v1") || "[]") as (User & {
-        internId?: string;
-    })[], normalized = raw.map((u, index) => ({ ...u, role: (u.role || (index === 0 ? "admin" : "intern")) as Role, approved: u.approved ?? index === 0, canManage: u.canManage ?? u.role === "admin", internIds: u.internIds || (u.internId ? [u.internId] : []), tag: (u.tag === "管理人" ? "管理人" : "实习生") as "实习生" | "管理人" })), main = normalized.find(u => u.username === "boss_admin"), needsReset = localStorage.getItem("wb-owner-password-reset-v2") !== "done", needsCleanSlate = localStorage.getItem("wb-clean-accounts-v1") !== "done", resetHash = "ca2ce44300ad7c4241983af782125fe843f3a2640c24afc2d7f1ccdd6104a2b9", owner: User = { id: "whiteboard-boss-owner", name: "白板BOSS主号", username: "boss_admin", passwordHash: resetHash, role: "owner", approved: true, canManage: true, internIds: [], tag: "管理人" }, cleanOwner: User = main ? { ...main, passwordHash: needsReset ? resetHash : main.passwordHash, role: "owner", approved: true, canManage: true, internIds: [], tag: "管理人" } : owner, normalUsers = main ? normalized.map(u => u.username === "boss_admin" ? cleanOwner : u.role === "owner" ? { ...u, role: "admin" as Role } : u) : [owner, ...normalized.map(u => u.role === "owner" ? { ...u, role: "admin" as Role } : u)], nextUsers = needsCleanSlate ? [cleanOwner] : normalUsers, storedActive = localStorage.getItem("frame-active-user") || ""; setUsers(nextUsers); setActiveId(nextUsers.some(u => u.id === storedActive) ? storedActive : ""); if (needsReset)
-        localStorage.setItem("wb-owner-password-reset-v2", "done"); if (needsCleanSlate)
-        localStorage.setItem("wb-clean-accounts-v1", "done"); setReady(true); }, []);
-    useEffect(() => { if (ready) {
-        localStorage.setItem("frame-users-v1", JSON.stringify(users));
-        activeId ? localStorage.setItem("frame-active-user", activeId) : localStorage.removeItem("frame-active-user");
-    } }, [users, activeId, ready]);
-    const active = users.find(u => u.id === activeId);
+    const [data, setData] = useState<SharedData | null>(null), [activeId, setActiveId] = useState(""), [ready, setReady] = useState(false), [syncError, setSyncError] = useState("");
+    const dirty = useRef(false);
+    const updateData: React.Dispatch<React.SetStateAction<SharedData>> = action => {
+        dirty.current = true;
+        setData(current => {
+            if (!current)
+                return typeof action === "function" ? action({ version: 9, users: [], interns: [], projects: [], settings: defaultSettings }) : action;
+            return typeof action === "function" ? action(current) : action;
+        });
+    };
+    useEffect(() => {
+        fetch("/api/session").then(async response => {
+            if (!response.ok)
+                return;
+            const payload = await response.json();
+            const next = importLegacyState(payload.state, payload.user);
+            if (next !== payload.state)
+                dirty.current = true;
+            setData(next);
+            setActiveId(payload.user.id);
+        }).finally(() => setReady(true));
+    }, []);
+    useEffect(() => {
+        if (!data || !activeId || !dirty.current)
+            return;
+        const timer = window.setTimeout(async () => {
+            dirty.current = false;
+            const response = await fetch("/api/state", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(data) });
+            setSyncError(response.ok ? "" : (await response.json()).error || "云端保存失败");
+        }, 350);
+        return () => window.clearTimeout(timer);
+    }, [data, activeId]);
+    useEffect(() => {
+        if (!activeId)
+            return;
+        const timer = window.setInterval(async () => {
+            if (dirty.current || document.hidden)
+                return;
+            const response = await fetch("/api/session");
+            if (response.ok) {
+                const payload = await response.json();
+                setData(payload.state);
+            }
+        }, 8000);
+        return () => window.clearInterval(timer);
+    }, [activeId]);
+    const active = data?.users.find(u => u.id === activeId);
+    const login = (payload: { user: User; state: SharedData }) => { const next = importLegacyState(payload.state, payload.user); if (next !== payload.state)
+        dirty.current = true; setData(next); setActiveId(payload.user.id); };
+    const logout = async () => { await fetch("/api/logout", { method: "POST" }); setActiveId(""); setData(null); };
     if (!ready)
         return null;
     if (!active)
-        return <AuthScreen users={users} setUsers={setUsers} login={setActiveId}/>;
+        return <AuthScreen login={login}/>;
     if (!active.approved)
-        return <PendingAccess user={active} logout={() => setActiveId("")}/>;
-    return <Workspace user={active} users={users} setUsers={setUsers} logout={() => setActiveId("")}/>;
+        return <PendingAccess user={active} logout={logout}/>;
+    return <Workspace user={active} data={data!} setData={updateData} logout={logout} syncError={syncError}/>;
 }
-function Workspace({ user, users, setUsers, logout }: {
+function Workspace({ user, data, setData, logout, syncError }: {
     user: User;
-    users: User[];
-    setUsers: React.Dispatch<React.SetStateAction<User[]>>;
+    data: SharedData;
+    setData: React.Dispatch<React.SetStateAction<SharedData>>;
     logout: () => void;
+    syncError: string;
 }) {
-    const [interns, setInterns] = useState<Intern[]>([]), [projects, setProjects] = useState<string[]>(["星际病院", "魔尊鼠鼠", "海底奇观"]), [settings, setSettings] = useState<Settings>(defaultSettings), [ready, setReady] = useState(false), [mode, setMode] = useState<"tasks" | "manage">("tasks"), [adminView, setAdminView] = useState<AdminView>("interns"), [selected, setSelected] = useState(""), [showAccount, setShowAccount] = useState(false), [modal, setModal] = useState<"intern" | "evaluation" | "problem" | null>(null);
-    useEffect(() => { if (localStorage.getItem("wb-clean-interns-v1") === "done")
-        return; const raw = localStorage.getItem("ai-intern-system-v1"), saved = raw ? JSON.parse(raw) : {}; localStorage.setItem("ai-intern-system-v1", JSON.stringify({ version: 8, interns: [], projects: saved.projects?.length ? saved.projects : ["星际病院", "魔尊鼠鼠", "海底奇观"], settings: { ...defaultSettings, ...saved.settings } })); localStorage.setItem("wb-clean-interns-v1", "done"); }, []);
-    useEffect(() => { try {
-        const raw = localStorage.getItem("ai-intern-system-v1");
-        if (raw) {
-            const p = JSON.parse(raw);
-            setInterns(p.interns.map((i: Intern) => ({ ...i, mentors: i.mentors?.length ? i.mentors : i.mentor ? [i.mentor] : [], evaluations: (i.evaluations || []).map(e => ({ ...e, evaluator: e.evaluator || "未登记" })), tasks: (i.tasks || []).map(t => ({ ...t, date: t.date || new Date().toISOString().slice(0, 10), category: t.category || "成片集数" })) })));
-            setProjects(p.projects?.length ? p.projects : ["星际病院", "魔尊鼠鼠", "海底奇观"]);
-            setSettings({ ...defaultSettings, ...p.settings });
-        }
-    }
-    finally {
-        setReady(true);
-    } }, []);
-    useEffect(() => { if (ready)
-        localStorage.setItem("ai-intern-system-v1", JSON.stringify({ version: 8, interns, projects, settings })); }, [interns, projects, settings, ready]);
+    const { users, interns, projects, settings } = data;
+    const updateSlice = <K extends keyof SharedData>(key: K): React.Dispatch<React.SetStateAction<SharedData[K]>> => action => setData(current => ({ ...current, [key]: typeof action === "function" ? (action as (value: SharedData[K]) => SharedData[K])(current[key]) : action }));
+    const setUsers = updateSlice("users"), setInterns = updateSlice("interns"), setProjects = updateSlice("projects"), setSettings = updateSlice("settings");
+    const [mode, setMode] = useState<"tasks" | "manage">("tasks"), [adminView, setAdminView] = useState<AdminView>("interns"), [selected, setSelected] = useState(""), [showAccount, setShowAccount] = useState(false), [modal, setModal] = useState<"intern" | "evaluation" | "problem" | null>(null);
     useEffect(() => {
-        if (!ready)
-            return;
         const internAccounts = users.filter(account => account.tag === "实习生");
         if (!internAccounts.length)
             return;
@@ -96,7 +124,7 @@ function Workspace({ user, users, setUsers, logout }: {
             });
             return changed ? nextUsers : currentUsers;
         });
-    }, [interns, ready, setUsers, users]);
+    }, [interns, setInterns, setUsers, users]);
     const isManager = user.role === "owner" || user.canManage, isOwner = user.role === "owner";
     const assigned = interns.filter(i => user.internIds.includes(i.id)), self = assigned[0] || interns.find(i => i.name === user.name), managed = isOwner ? interns : user.canManage ? assigned : self ? [self] : [];
     const ranked = useMemo(() => [...managed].sort((a, b) => { const ma = metrics(a, settings), mb = metrics(b, settings); if (ma.unrated !== mb.unrated)
@@ -108,7 +136,7 @@ function Workspace({ user, users, setUsers, logout }: {
         setAdminView("interns");
     } };
     const create = (i: Intern) => { setInterns(xs => [...xs, i]); setSelected(i.id); setModal(null); setAdminView("detail"); };
-    return <div className="wb-shell"><header className="wb-topbar"><div className="wb-brand"><div className="bossmark"><i /><i /></div><div><b>白板BOSS</b><span>WHITEBOARD BOSS</span></div></div><div className="mode-switch"><button className={mode === "tasks" ? "active" : ""} onClick={() => setMode("tasks")}>任务白板</button>{isManager && <button className={mode === "manage" ? "active" : ""} onClick={() => setMode("manage")}>管理界面</button>}</div><button className="user-pill" onClick={() => setShowAccount(true)}><UserAvatar user={user}/><span><b>{user.name}</b><small>{user.tag}</small></span></button></header>
+    return <div className="wb-shell"><header className="wb-topbar"><div className="wb-brand"><div className="bossmark"><i /><i /></div><div><b>白板BOSS</b><span>WHITEBOARD BOSS</span></div></div><div className="mode-switch"><button className={mode === "tasks" ? "active" : ""} onClick={() => setMode("tasks")}>任务白板</button>{isManager && <button className={mode === "manage" ? "active" : ""} onClick={() => setMode("manage")}>管理界面</button>}</div><button className="user-pill" onClick={() => setShowAccount(true)}><UserAvatar user={user}/><span><b>{user.name}</b><small>{user.tag}</small></span></button></header>{syncError && <div className="sync-error">云端同步暂时失败：{syncError}</div>}
  <main className="wb-main">{mode === "tasks" ? <CalendarBoard interns={managed} projects={projects} fixedIntern={!isManager || managed.length <= 1} initialId={self?.id} setInterns={setInterns}/> : <><div className="admin-head"><div><span>MANAGEMENT</span><h1>{isOwner ? "人员管理" : "我的实习生"}</h1></div><nav><button className={adminView === "interns" || adminView === "detail" ? "active" : ""} onClick={() => setAdminView("interns")}>实习生</button><button className={adminView === "projects" ? "active" : ""} onClick={() => setAdminView("projects")}>项目库</button>{isOwner && <button className={adminView === "settings" ? "active" : ""} onClick={() => setAdminView("settings")}>评分设置</button>}{isOwner && <button className={adminView === "access" ? "active" : ""} onClick={() => setAdminView("access")}>账号授权</button>}</nav></div>{adminView === "interns" && <InternHub interns={ranked} users={users} setInterns={setInterns} settings={settings} open={open} add={isOwner ? () => setModal("intern") : undefined}/>} {adminView === "detail" && current && <Detail intern={current} settings={settings} rank={ranked.findIndex(i => i.id === current.id) + 1} total={ranked.length} back={() => setAdminView("interns")} addEvaluation={canScore ? () => setModal("evaluation") : undefined} scoredToday={alreadyScored} addProblem={() => setModal("problem")} remove={remove}/>} {adminView === "projects" && <ProjectPanel projects={projects} setProjects={setProjects}/>} {adminView === "settings" && isOwner && <SettingsPanel value={settings} change={setSettings}/>} {adminView === "access" && isOwner && <AccessPanel users={users} interns={interns} setUsers={setUsers}/>}</>}</main>
  {modal && <AdminModal kind={modal} current={current} evaluator={user.name} close={() => setModal(null)} setInterns={setInterns} created={create}/>} {showAccount && <AccountPanel user={user} setUsers={setUsers} close={() => setShowAccount(false)} logout={logout}/>}</div>;
 }
@@ -177,9 +205,7 @@ function AccessPanel({ users, interns, setUsers }: {
     if (!window.confirm(`确定删除离职人员账号“${u.name}”吗？删除后无法恢复。`))
         return;
     setUsers(xs => {
-        const next = xs.filter(x => x.id !== u.id);
-        localStorage.setItem("frame-users-v1", JSON.stringify(next));
-        return next;
+        return xs.filter(x => x.id !== u.id);
     });
 }, create = async (e: React.FormEvent<HTMLFormElement>) => { e.preventDefault(); const d = new FormData(e.currentTarget), username = String(d.get("username")).trim(); if (!username || users.some(u => u.username === username)) {
     alert("账号为空或已存在");
@@ -200,14 +226,21 @@ function AdminModal({ kind, current, evaluator, close, setInterns, created }: {
     return i; if (kind === "problem")
     return { ...i, problems: [...i.problems, { id, title: String(d.get("title")), type: String(d.get("type")), severity: String(d.get("severity")) as "低" | "中" | "高" | "严重", repeats: Number(d.get("repeats")), solved: false }] }; const pts = (n: string) => Number(d.get(n)) * 20, date = new Date().toISOString().slice(0, 10); if (i.evaluations.some(e => e.date === date))
     return i; return { ...i, evaluations: [...i.evaluations, { id, label: `${date.slice(5).replace("-", ".")} 每日评分`, date, evaluator, scores: { video: pts("video"), edit: pts("edit"), promo: pts("promo"), aesthetic: pts("aesthetic"), final: pts("final") }, growth: pts("growth"), independence: pts("independence"), professionalism: pts("professionalism"), interventions: 0 }] }; })); close(); }; return <div className="modal-back"><form className={`modal ${kind === "evaluation" ? "wide-modal" : ""}`} onSubmit={submit}><ModalHead title={kind === "intern" ? "新增实习生" : kind === "problem" ? "记录问题" : `今日评分 · ${current?.name}`} close={close}/>{kind === "intern" && <><Field name="name" label="姓名"/><Field name="mentor" label="指导人（创建后仅主号可修改）" value="于勒"/></>} {kind === "problem" && <><Field name="title" label="问题描述"/><Field name="type" label="问题类型" value="镜头"/><label>严重程度<select name="severity"><option>低</option><option>中</option><option>高</option><option>严重</option></select></label><Field name="repeats" label="累计发生次数" type="number" value="1"/></>}{kind === "evaluation" && <><div className="evaluator-lock"><span>本次评分人</span><b>{evaluator}</b><small>提交后今日其他归属管理员不可重复评分</small></div><div className="rubric-list">{scoreKeys.map(([k, l]) => <RubricSelect key={k} name={k} label={l}/>)}</div><h3 className="subhead">工作方式</h3><div className="rubric-list"><RubricSelect name="growth" label="学习成长"/><RubricSelect name="independence" label="独立作业"/><RubricSelect name="professionalism" label="职业协作"/></div></>}<ModalActions close={close}/></form></div>; }
-function AuthScreen({ users, login }: {
-    users: User[];
-    setUsers: React.Dispatch<React.SetStateAction<User[]>>;
-    login: (id: string) => void;
-}) { const [error, setError] = useState(""); const submit = async (e: React.FormEvent<HTMLFormElement>) => { e.preventDefault(); const d = new FormData(e.currentTarget), username = String(d.get("username")).trim(), passwordHash = await hash(String(d.get("password"))), u = users.find(x => x.username === username && x.passwordHash === passwordHash); if (!u) {
-    setError("账号或密码不正确");
-    return;
-} login(u.id); }; return <main className="login-page"><section className="login-mark"><div className="bossmark"><i /><i /></div><b>白板BOSS</b><span>WHITEBOARD BOSS</span></section><form className="login-card" onSubmit={submit}><span>WELCOME BACK</span><h1>登录</h1><p>新账号由管理员在管理界面统一创建。</p><Field name="username" label="账号"/><Field name="password" label="密码" type="password"/>{error && <div className="auth-error">{error}</div>}<button className="primary login-submit">登录</button></form></main>; }
+function AuthScreen({ login }: {
+    login: (payload: { user: User; state: SharedData }) => void;
+}) { const [error, setError] = useState(""), [submitting, setSubmitting] = useState(false); const submit = async (e: React.FormEvent<HTMLFormElement>) => { e.preventDefault(); setSubmitting(true); setError(""); const d = new FormData(e.currentTarget), username = String(d.get("username")).trim(), passwordHash = await hash(String(d.get("password"))); try {
+    const response = await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, passwordHash }) });
+    const payload = await response.json();
+    if (!response.ok) {
+        setError(payload.error || "账号或密码不正确");
+        return;
+    }
+    login(payload);
+} catch {
+    setError("暂时无法连接云端，请稍后重试");
+} finally {
+    setSubmitting(false);
+} }; return <main className="login-page"><section className="login-mark"><div className="bossmark"><i /><i /></div><b>白板BOSS</b><span>WHITEBOARD BOSS</span></section><form className="login-card" onSubmit={submit}><span>WELCOME BACK</span><h1>登录</h1><p>账号由管理员主号统一创建，可在任意设备登录。</p><Field name="username" label="账号"/><Field name="password" label="密码" type="password"/>{error && <div className="auth-error">{error}</div>}<button className="primary login-submit" disabled={submitting}>{submitting ? "正在连接云端…" : "登录"}</button></form></main>; }
 function PendingAccess({ user, logout }: {
     user: User;
     logout: () => void;

@@ -1,0 +1,14 @@
+.sync-error {
+  position: sticky;
+  top: 76px;
+  z-index: 19;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 10px 16px;
+  background: #fff1f2;
+  color: #b42318;
+  border: 1px solid #fecdd3;
+  border-radius: 0 0 14px 14px;
+  font-size: 12px;
+  font-weight: 700;
+}

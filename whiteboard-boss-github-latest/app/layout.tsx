@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import "./minimal.css";
+import "./sync.css";
 
 export const metadata: Metadata = {
   title: "白板BOSS · AI漫剧人才管理",
