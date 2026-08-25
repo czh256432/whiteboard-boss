@@ -27,10 +27,20 @@ export const newIntern=(name:string,mentor:string):Intern=>({id:crypto.randomUUI
 export function production(s:Scores){return (s.video*.2+s.edit*.15+s.promo*.1+s.aesthetic*.1+s.final*.05)/.6}
 export function problemPenalty(i:Intern){const unit={"低":.5,"中":1,"高":2,"严重":4};return Math.min(25,i.problems.reduce((sum,p)=>sum+(p.solved?.25:1)*unit[p.severity]*Math.max(1,p.repeats),0))}
 export function metrics(i:Intern,settings:Settings){
- if(!i.evaluations.length)return{unrated:true,prod:0,baseProd:0,overall:0,risk:0,penalty:0,retention:0,grade:"待",passRate:0,intervention:0,management:"待评估",eligible:false};
+ if(!i.evaluations.length)return{unrated:true,prod:0,baseProd:0,overall:0,risk:0,penalty:0,retention:0,thresholdGap:0,grade:"待",passRate:0,intervention:0,management:"待评估",eligible:false};
  const first=i.evaluations[0],last=i.evaluations.at(-1)!;const prod=production(last.scores),baseProd=production(first.scores),rawOverall=prod*.6+last.growth*.15+last.independence*.15+last.professionalism*.1,penalty=problemPenalty(i),overall=Math.max(0,rawOverall-penalty);
- const retention=Math.max(0,Math.min(100,rawOverall*.75+last.growth*.15+last.independence*.1-penalty));let grade=retention>=90&&prod>=90?"A":retention>=82&&prod>=80?"B":retention>=72&&prod>=70?"C":retention>=60?"D":"E";if(prod<70&&["A","B"].includes(grade))grade="C";
+ const retention=Math.max(0,Math.min(100,rawOverall*.75+last.growth*.15+last.independence*.1-penalty)),thresholdGap=retention-settings.minRetention;
+ const grade=thresholdGap>=15?"A":thresholdGap>=8?"B":thresholdGap>=0?"C":thresholdGap>=-10?"D":"E";
  const passRate=i.tasks.length?i.tasks.filter(t=>t.passed).length/i.tasks.length*100:0,intervention=last.interventions,management=intervention<1.5?"低":intervention<2.5?"较低":intervention<3.5?"中等":intervention<4.5?"较高":"高";
- return{unrated:false,prod,baseProd,overall,risk:penalty,penalty,retention,grade,passRate,intervention,management,eligible:["A","B","C"].includes(grade)&&retention>=settings.minRetention};
+ return{unrated:false,prod,baseProd,overall,risk:penalty,penalty,retention,thresholdGap,grade,passRate,intervention,management,eligible:retention>=settings.minRetention};
 }
-export function reasons(i:Intern,settings:Settings){const m=metrics(i,settings);if(m.unrated)return["尚未完成首次统一评估，当前不参与评级和留用排名","请完成 AI视频、剪辑、剧宣、审美、成片质量五项评分"];const first=i.evaluations[0],last=i.evaluations.at(-1)!;const risk=m.penalty>0?`问题复发按严重度自动扣除 ${m.penalty.toFixed(1)} 分`:"当前没有问题复发扣分";if(m.eligible)return[`AI视频由 ${first.scores.video} 提升至 ${last.scores.video}，提升 ${last.scores.video-first.scores.video} 分`,`留用指数 ${m.retention.toFixed(1)} 分，达到留用门槛 ${settings.minRetention} 分`,risk];return[`当前核心生产能力 ${m.prod.toFixed(1)} 分`,`留用指数 ${m.retention.toFixed(1)} 分${m.retention<settings.minRetention?`，低于门槛 ${settings.minRetention} 分`:""}`,risk]}
+export function reasons(i:Intern,settings:Settings){
+ const m=metrics(i,settings);if(m.unrated)return["尚未完成首次统一评估，当前不参与评级和留用排名","请完成 AI视频、剪辑、剧宣、审美、成片质量五项评分"];
+ const first=i.evaluations[0],last=i.evaluations.at(-1)!,labels:Record<keyof Scores,string>={video:"AI视频",edit:"剪辑",promo:"剧宣",aesthetic:"审美",final:"成片"};
+ const ability=(Object.keys(last.scores) as (keyof Scores)[]).map(key=>({key,value:last.scores[key],delta:last.scores[key]-first.scores[key]})),strongest=[...ability].sort((a,b)=>b.value-a.value)[0],weakest=[...ability].sort((a,b)=>a.value-b.value)[0],bestGrowth=[...ability].sort((a,b)=>b.delta-a.delta)[0];
+ const gap=Math.abs(m.thresholdGap).toFixed(1),decision=m.eligible?`高于当前门槛 ${gap} 分，结论调整为建议留用`:`距离当前门槛仍差 ${gap} 分，结论调整为暂不留用`;
+ const trend=bestGrowth.delta>0?`${labels[bestGrowth.key]}较首次提升 ${bestGrowth.delta} 分，是当前最明显的成长项`:`生产能力较首次没有明显提升，需要观察后续成长速度`;
+ const abilityNote=`当前优势为${labels[strongest.key]} ${strongest.value} 分；优先补强${labels[weakest.key]} ${weakest.value} 分`;
+ const risk=m.penalty>0?`问题复发按严重度扣除 ${m.penalty.toFixed(1)} 分，需先降低复发率`:"当前没有问题复发扣分，稳定性风险较低";
+ return[`留用指数 ${m.retention.toFixed(1)} 分，${decision}`,trend,abilityNote,risk];
+}
