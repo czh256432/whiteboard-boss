@@ -81,12 +81,13 @@ export default function EvaluationApp() {
         return <AuthScreen login={login}/>;
     if (!active.approved)
         return <PendingAccess user={active} logout={logout}/>;
-    return <Workspace user={active} data={data!} setData={updateData} logout={logout} syncError={syncError}/>;
+    return <Workspace user={active} data={data!} setData={updateData} acceptServerData={next => { dirty.current = false; setData(next); }} logout={logout} syncError={syncError}/>;
 }
-function Workspace({ user, data, setData, logout, syncError }: {
+function Workspace({ user, data, setData, acceptServerData, logout, syncError }: {
     user: User;
     data: SharedData;
     setData: React.Dispatch<React.SetStateAction<SharedData>>;
+    acceptServerData: (data: SharedData) => void;
     logout: () => void;
     syncError: string;
 }) {
@@ -94,37 +95,6 @@ function Workspace({ user, data, setData, logout, syncError }: {
     const updateSlice = <K extends keyof SharedData>(key: K): React.Dispatch<React.SetStateAction<SharedData[K]>> => action => setData(current => ({ ...current, [key]: typeof action === "function" ? (action as (value: SharedData[K]) => SharedData[K])(current[key]) : action }));
     const setUsers = updateSlice("users"), setInterns = updateSlice("interns"), setProjects = updateSlice("projects"), setSettings = updateSlice("settings");
     const [mode, setMode] = useState<"tasks" | "manage">("tasks"), [adminView, setAdminView] = useState<AdminView>("interns"), [selected, setSelected] = useState(""), [showAccount, setShowAccount] = useState(false), [modal, setModal] = useState<"intern" | "evaluation" | "problem" | null>(null);
-    useEffect(() => {
-        const internAccounts = users.filter(account => account.tag === "实习生");
-        if (!internAccounts.length)
-            return;
-        const nextInterns = [...interns];
-        const profileByAccount = new Map<string, string>();
-        let addedProfile = false;
-        internAccounts.forEach(account => {
-            let profile = nextInterns.find(intern => intern.name.trim() === account.name.trim())
-                || nextInterns.find(intern => account.internIds.includes(intern.id));
-            if (!profile) {
-                profile = newIntern(account.name, "");
-                nextInterns.push(profile);
-                addedProfile = true;
-            }
-            profileByAccount.set(account.id, profile.id);
-        });
-        if (addedProfile)
-            setInterns(nextInterns);
-        setUsers(currentUsers => {
-            let changed = false;
-            const nextUsers = currentUsers.map(account => {
-                const profileId = profileByAccount.get(account.id);
-                if (!profileId || account.internIds.length === 1 && account.internIds[0] === profileId)
-                    return account;
-                changed = true;
-                return { ...account, internIds: [profileId] };
-            });
-            return changed ? nextUsers : currentUsers;
-        });
-    }, [interns, setInterns, setUsers, users]);
     const isManager = user.role === "owner" || user.canManage, isOwner = user.role === "owner";
     const assigned = interns.filter(i => user.internIds.includes(i.id)), self = assigned[0] || interns.find(i => i.name === user.name), managed = isOwner ? interns : user.canManage ? assigned : self ? [self] : [];
     const ranked = useMemo(() => [...managed].sort((a, b) => { const ma = metrics(a, settings), mb = metrics(b, settings); if (ma.unrated !== mb.unrated)
@@ -137,7 +107,7 @@ function Workspace({ user, data, setData, logout, syncError }: {
     } };
     const create = (i: Intern) => { setInterns(xs => [...xs, i]); setSelected(i.id); setModal(null); setAdminView("detail"); };
     return <div className="wb-shell"><header className="wb-topbar"><div className="wb-brand"><div className="bossmark"><i /><i /></div><div><b>白板BOSS</b><span>WHITEBOARD BOSS</span></div></div><div className="mode-switch"><button className={mode === "tasks" ? "active" : ""} onClick={() => setMode("tasks")}>任务白板</button>{isManager && <button className={mode === "manage" ? "active" : ""} onClick={() => setMode("manage")}>管理界面</button>}</div><button className="user-pill" onClick={() => setShowAccount(true)}><UserAvatar user={user}/><span><b>{user.name}</b><small>{user.tag}</small></span></button></header>{syncError && <div className="sync-error">云端同步暂时失败：{syncError}</div>}
- <main className="wb-main">{mode === "tasks" ? <CalendarBoard interns={managed} projects={projects} fixedIntern={!isManager || managed.length <= 1} initialId={self?.id} setInterns={setInterns}/> : <><div className="admin-head"><div><span>MANAGEMENT</span><h1>{isOwner ? "人员管理" : "我的实习生"}</h1></div><nav><button className={adminView === "interns" || adminView === "detail" ? "active" : ""} onClick={() => setAdminView("interns")}>实习生</button><button className={adminView === "projects" ? "active" : ""} onClick={() => setAdminView("projects")}>项目库</button>{isOwner && <button className={adminView === "settings" ? "active" : ""} onClick={() => setAdminView("settings")}>评分设置</button>}{isOwner && <button className={adminView === "access" ? "active" : ""} onClick={() => setAdminView("access")}>账号授权</button>}</nav></div>{adminView === "interns" && <InternHub interns={ranked} users={users} setInterns={setInterns} settings={settings} open={open} add={isOwner ? () => setModal("intern") : undefined}/>} {adminView === "detail" && current && <Detail intern={current} settings={settings} rank={ranked.findIndex(i => i.id === current.id) + 1} total={ranked.length} back={() => setAdminView("interns")} addEvaluation={canScore ? () => setModal("evaluation") : undefined} scoredToday={alreadyScored} addProblem={() => setModal("problem")} remove={remove}/>} {adminView === "projects" && <ProjectPanel projects={projects} setProjects={setProjects}/>} {adminView === "settings" && isOwner && <SettingsPanel value={settings} change={setSettings}/>} {adminView === "access" && isOwner && <AccessPanel users={users} interns={interns} setUsers={setUsers}/>}</>}</main>
+ <main className="wb-main">{mode === "tasks" ? <CalendarBoard interns={managed} projects={projects} fixedIntern={!isManager || managed.length <= 1} initialId={self?.id} setInterns={setInterns}/> : <><div className="admin-head"><div><span>MANAGEMENT</span><h1>{isOwner ? "人员管理" : "我的实习生"}</h1></div><nav><button className={adminView === "interns" || adminView === "detail" ? "active" : ""} onClick={() => setAdminView("interns")}>实习生</button><button className={adminView === "projects" ? "active" : ""} onClick={() => setAdminView("projects")}>项目库</button>{isOwner && <button className={adminView === "settings" ? "active" : ""} onClick={() => setAdminView("settings")}>评分设置</button>}{isOwner && <button className={adminView === "access" ? "active" : ""} onClick={() => setAdminView("access")}>账号授权</button>}</nav></div>{adminView === "interns" && <InternHub interns={ranked} users={users} setInterns={setInterns} settings={settings} open={open} add={isOwner ? () => setModal("intern") : undefined}/>} {adminView === "detail" && current && <Detail intern={current} settings={settings} rank={ranked.findIndex(i => i.id === current.id) + 1} total={ranked.length} back={() => setAdminView("interns")} addEvaluation={canScore ? () => setModal("evaluation") : undefined} scoredToday={alreadyScored} addProblem={() => setModal("problem")} remove={remove}/>} {adminView === "projects" && <ProjectPanel projects={projects} setProjects={setProjects}/>} {adminView === "settings" && isOwner && <SettingsPanel value={settings} change={setSettings}/>} {adminView === "access" && isOwner && <AccessPanel users={users} interns={interns} acceptServerData={acceptServerData}/>}</>}</main>
  {modal && <AdminModal kind={modal} current={current} evaluator={user.name} close={() => setModal(null)} setInterns={setInterns} created={create}/>} {showAccount && <AccountPanel user={user} setUsers={setUsers} close={() => setShowAccount(false)} logout={logout}/>}</div>;
 }
 function CalendarBoard({ interns, projects, fixedIntern, initialId, setInterns }: {
@@ -197,7 +167,7 @@ function ProjectPanel({ projects, setProjects }: {
     setProjects(xs => [...xs, name]);
     e.currentTarget.reset();
 } }; return <section className="panel project-panel"><div className="section-title"><span>PROJECT LIBRARY</span><h2>项目库</h2><p>管理员在这里添加项目；实习生记录工作时只能从项目库中选择。</p></div><form className="project-add" onSubmit={add}><input required name="project" placeholder="输入新项目名称"/><button className="primary">＋ 添加项目</button></form><div className="project-list">{projects.map(project => <div key={project}><i style={projectStyle(project)}/><span>{project}</span><button onClick={() => setProjects(xs => xs.filter(x => x !== project))}>移除</button></div>)}{!projects.length && <div className="quiet-empty">还没有项目，请先添加。</div>}</div></section>; }
-function AccessPanel({ users, interns, setUsers }: {
+function AccessPanelLegacy({ users, interns, setUsers }: {
     users: User[];
     interns: Intern[];
     setUsers: React.Dispatch<React.SetStateAction<User[]>>;
@@ -211,6 +181,60 @@ function AccessPanel({ users, interns, setUsers }: {
     alert("账号为空或已存在");
     return;
 } const tag = String(d.get("tag")) as "实习生" | "管理人", u: User = { id: crypto.randomUUID(), name: String(d.get("name")).trim(), username, passwordHash: await hash(String(d.get("password"))), role: tag === "管理人" ? "admin" : "intern", approved: true, canManage: tag === "管理人", internIds: [], tag }; setUsers(xs => [...xs, u]); e.currentTarget.reset(); }; return <><section className="panel account-create"><div className="section-title"><span>CREATE ACCOUNT</span><h2>创建新账号</h2><p>账号只能由管理员主号创建，并在这里设置初始密码。</p></div><form onSubmit={create}><Field name="name" label="姓名"/><Field name="username" label="登录账号"/><Field name="password" label="初始密码" type="password"/><label>用户标签<select name="tag" defaultValue="实习生"><option>实习生</option><option>管理人</option></select></label><button className="primary">创建并允许登录</button></form></section><details className="collapsible-wrap" open><summary>用户标签与登录权限 <span>{users.length} 个账号</span></summary><section className="panel access-panel"><div className="section-title"><span>ACCOUNT CONTROL</span><h2>用户标签与登录权限</h2><p>标签改为“管理人”后自动获得管理权限，不再单独设置管理权限。</p></div><div className="access-list">{users.map(u => <div className="access-row account-permission-row compact-permission" key={u.id}><UserAvatar user={u}/><div><b>{u.name}</b><span>@{u.username}</span></div>{u.role === "owner" ? <strong className="owner-tag">管理员主号</strong> : <><label className="tag-select">用户标签<select value={u.tag} onChange={e => { const tag = e.target.value as "实习生" | "管理人"; update(u.id, { tag, canManage: tag === "管理人", role: tag === "管理人" ? "admin" : "intern" }); }}><option>实习生</option><option>管理人</option></select></label><label className="permission-switch"><input type="checkbox" checked={u.approved} onChange={e => update(u.id, { approved: e.target.checked })}/><span /><b>允许登录</b></label><button className="delete-account" onClick={() => removeAccount(u)}>删除账号</button></>}</div>)}</div></section></details><details className="collapsible-wrap" open><summary>授权实习生 <span>{managerAccounts.length} 位管理人</span></summary><section className="panel intern-authorization"><div className="section-title"><span>INTERN ACCESS</span><h2>授权实习生</h2><p>这里只显示标签为“管理人”的用户。被授权后，该管理人只能查看并评分所选实习生。</p></div><div className="authorization-list">{managerAccounts.map(u => <div key={u.id}><div className="authorization-user"><UserAvatar user={u}/><span><b>{u.name}</b><small>@{u.username}</small></span></div><div className="intern-checks">{interns.map(i => <label key={i.id}><input type="checkbox" checked={u.internIds.includes(i.id)} onChange={() => toggleIntern(u, i.id)}/>{i.name}</label>)}</div></div>)}{!managerAccounts.length && <div className="quiet-empty">暂时没有标签为“管理人”的用户。</div>}</div></section></details></>; }
+function AccessPanel({ users, interns, acceptServerData }: {
+    users: User[];
+    interns: Intern[];
+    acceptServerData: (data: SharedData) => void;
+}) {
+    const [savingId, setSavingId] = useState("");
+    const members = users.filter(user => user.role !== "owner");
+    const managerAccounts = members.filter(user => user.tag === "管理人");
+    const managerNames = new Set(managerAccounts.map(user => user.name.trim()));
+    const assignableInterns = interns.filter(intern => !managerNames.has(intern.name.trim()));
+
+    const mutate = async (method: "POST" | "PATCH" | "DELETE", body: unknown, saving = "") => {
+        setSavingId(saving);
+        try {
+            const response = await fetch("/api/accounts", { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+            const payload = await response.json();
+            if (!response.ok)
+                throw new Error(payload.error || "保存失败");
+            acceptServerData(payload.state);
+            return true;
+        } catch (error) {
+            alert(error instanceof Error ? error.message : "保存失败，请重试");
+            return false;
+        } finally {
+            setSavingId("");
+        }
+    };
+    const update = (id: string, patch: Partial<User>) => mutate("PATCH", { id, patch }, id);
+    const toggleIntern = (user: User, internId: string) => update(user.id, { internIds: user.internIds.includes(internId) ? user.internIds.filter(id => id !== internId) : [...user.internIds, internId] });
+    const removeAccount = async (user: User) => {
+        if (!window.confirm(`确定删除离职人员账号“${user.name}”吗？删除后无法恢复。`))
+            return;
+        await mutate("DELETE", { id: user.id }, user.id);
+    };
+    const create = async (event: React.FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        const form = event.currentTarget, data = new FormData(form);
+        const ok = await mutate("POST", {
+            name: String(data.get("name")).trim(),
+            username: String(data.get("username")).trim(),
+            passwordHash: await hash(String(data.get("password"))),
+            tag: String(data.get("tag")),
+        }, "create");
+        if (ok) {
+            form.reset();
+            alert("账号已写入共享数据库，现在可以在其他手机登录。");
+        }
+    };
+
+    return <><section className="panel account-create"><div className="section-title"><span>CREATE ACCOUNT</span><h2>创建新账号</h2><p>创建后立即写入共享数据库；实习生会同时生成个人主页。</p></div><form onSubmit={create}><Field name="name" label="姓名"/><Field name="username" label="登录账号"/><Field name="password" label="初始密码" type="password"/><label>用户标签<select name="tag" defaultValue="实习生"><option>实习生</option><option>管理人</option></select></label><button className="primary" disabled={savingId === "create"}>{savingId === "create" ? "正在保存…" : "创建并允许登录"}</button></form></section>
+    <details className="collapsible-wrap" open><summary>用户标签与登录权限 <span>{users.length} 个账号</span></summary><section className="panel access-panel"><div className="section-title"><span>ACCOUNT CONTROL</span><h2>用户标签与登录权限</h2><p>切换为“管理人”后，会立即清除其旧的实习生身份关联。</p></div><div className="access-list">{users.map(user => <div className="access-row account-permission-row compact-permission" key={user.id}><UserAvatar user={user}/><div><b>{user.name}</b><span>@{user.username}</span></div>{user.role === "owner" ? <strong className="owner-tag">管理员主号</strong> : <><label className="tag-select">用户标签<select disabled={savingId === user.id} value={user.tag} onChange={event => update(user.id, { tag: event.target.value as "实习生" | "管理人" })}><option>实习生</option><option>管理人</option></select></label><label className="permission-switch"><input disabled={savingId === user.id} type="checkbox" checked={user.approved} onChange={event => update(user.id, { approved: event.target.checked })}/><span/><b>允许登录</b></label><button className="delete-account" disabled={savingId === user.id} onClick={() => removeAccount(user)}>删除账号</button></>}</div>)}</div></section></details>
+    <details className="collapsible-wrap" open><summary>授权实习生 <span>{managerAccounts.length} 位管理人</span></summary><section className="panel intern-authorization"><div className="section-title"><span>INTERN ACCESS</span><h2>授权实习生</h2><p>管理人不会出现在实习生选项中；勾选后立即同步到该管理人的主页。</p></div><div className="authorization-list">{managerAccounts.map(user => <div key={user.id}><div className="authorization-user"><UserAvatar user={user}/><span><b>{user.name}</b><small>@{user.username}</small></span></div><div className="intern-checks">{assignableInterns.map(intern => <label key={intern.id}><input disabled={savingId === user.id} type="checkbox" checked={user.internIds.includes(intern.id)} onChange={() => toggleIntern(user, intern.id)}/>{intern.name}</label>)}</div></div>)}{!managerAccounts.length && <div className="quiet-empty">暂时没有标签为“管理人”的用户。</div>}</div></section></details></>;
+}
+
 function AdminModal({ kind, current, evaluator, close, setInterns, created }: {
     kind: "intern" | "evaluation" | "problem";
     current?: Intern;

@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { newIntern } from "./evaluation";
 import { initialSharedData, type SharedData, type User } from "./shared-state";
 
 const STATE_ID = "main";
@@ -20,10 +21,36 @@ export async function ensureDatabase() {
 export async function loadSharedData(): Promise<SharedData> {
   await ensureDatabase();
   const row = await db().prepare("SELECT data FROM app_state WHERE id = ?").bind(STATE_ID).first<{ data: string }>();
-  if (row?.data) return JSON.parse(row.data) as SharedData;
+  if (row?.data) {
+    const current = JSON.parse(row.data) as SharedData;
+    const normalized = normalizeIdentityLinks(current);
+    if (JSON.stringify(normalized) !== JSON.stringify(current)) await saveSharedData(normalized);
+    return normalized;
+  }
   const state = initialSharedData();
   await saveSharedData(state);
   return state;
+}
+
+export function normalizeIdentityLinks(input: SharedData): SharedData {
+  const interns = [...input.interns];
+  const users = input.users.map(account => {
+    if (account.role === "owner") {
+      return { ...account, role: "owner" as const, tag: "管理人" as const, approved: true, canManage: true };
+    }
+    if (account.tag === "管理人") {
+      const ownProfiles = new Set(interns.filter(intern => intern.name.trim() === account.name.trim()).map(intern => intern.id));
+      return { ...account, role: "admin" as const, canManage: true, internIds: account.internIds.filter(id => !ownProfiles.has(id)) };
+    }
+    let profile = interns.find(intern => account.internIds.includes(intern.id))
+      || interns.find(intern => intern.name.trim() === account.name.trim());
+    if (!profile) {
+      profile = newIntern(account.name, "");
+      interns.push(profile);
+    }
+    return { ...account, role: "intern" as const, tag: "实习生" as const, canManage: false, internIds: [profile.id] };
+  });
+  return { ...input, version: 9, users, interns };
 }
 
 export async function saveSharedData(state: SharedData) {
@@ -75,13 +102,13 @@ export function mergeAuthorizedState(current: SharedData, incoming: SharedData, 
     const before = new Map(current.users.map(user => [user.id, user]));
     const users = incoming.users.map(user => preservePassword(user, before.get(user.id)));
     const owner = users.find(user => user.id === actor.id) || current.users.find(user => user.role === "owner")!;
-    return {
+    return normalizeIdentityLinks({
       version: 9,
       users: users.map(user => user.id === owner.id ? { ...user, role: "owner", tag: "管理人", approved: true, canManage: true } : user),
       interns: incoming.interns,
       projects: incoming.projects,
       settings: incoming.settings,
-    };
+    });
   }
 
   const allowed = new Set(actor.internIds);
